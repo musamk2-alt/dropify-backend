@@ -1,164 +1,143 @@
+// /opt/dropify/Discount API/dropify-backend/routes/shopify.js
+require("dotenv").config();
 const express = require("express");
 const axios = require("axios");
-const crypto = require("crypto");
+const router = express.Router();
 
 const Streamer = require("../models/Streamer");
 const { ensureOrderCreateWebhook } = require("../services/shopify");
 
-const router = express.Router();
-
-const SHOPIFY_CLIENT_ID = process.env.SHOPIFY_CLIENT_ID;
-const SHOPIFY_CLIENT_SECRET = process.env.SHOPIFY_CLIENT_SECRET;
-const SHOPIFY_REDIRECT_URI = process.env.SHOPIFY_REDIRECT_URI;
-const SHOPIFY_SCOPES =
-  process.env.SHOPIFY_SCOPES ||
-  "write_price_rules,read_price_rules,write_discounts,read_discounts,read_orders";
+const {
+  SHOPIFY_CLIENT_ID,
+  SHOPIFY_CLIENT_SECRET,
+  SHOPIFY_REDIRECT_URI,
+  SHOPIFY_SCOPES,
+} = process.env;
 
 /**
- * START SHOPIFY OAUTH
+ * 🔹 START Shopify OAuth
  *
- * GET /api/shopify/auth/start?login=<twitchLogin>&shop=<shop-domain.myshopify.com>
- *
- * - Validates params
- * - Finds the streamer
- * - Encodes state (twitchLogin + shop)
- * - Redirects to Shopify /admin/oauth/authorize with scopes + redirect_uri
+ * GET /api/shopify/auth/start?login=<twitchLogin>&shop=<shop-domain>
  */
 router.get("/auth/start", async (req, res) => {
   try {
     const { login, shop } = req.query;
 
     if (!login || !shop) {
-      return res.status(400).send("Missing login or shop");
+      return res.status(400).send("Missing login or shop parameter.");
     }
 
     const twitchLogin = String(login).toLowerCase();
     const shopDomain = String(shop);
 
-    const streamer = await Streamer.findOne({
-      twitchLogin,
-    });
-
+    // Optional: verify streamer exists
+    const streamer = await Streamer.findOne({ twitchLogin });
     if (!streamer) {
-      return res.status(404).send("Streamer not found");
+      return res.status(404).send("Streamer not found.");
     }
 
-    const stateRaw = JSON.stringify({
-      t: streamer.twitchLogin, // twitch login
-      s: shopDomain, // store domain
-      r: crypto.randomBytes(8).toString("hex"), // random nonce
-    });
+    if (!SHOPIFY_CLIENT_ID || !SHOPIFY_REDIRECT_URI || !SHOPIFY_SCOPES) {
+      console.error("Shopify env vars missing.");
+      return res.status(500).send("Shopify config missing on server.");
+    }
 
-    const state = Buffer.from(stateRaw, "utf8").toString("base64url");
+    // Simple state format: "login:<twitchLogin>"
+    const state = `login:${twitchLogin}`;
 
-    const installUrl = `https://${encodeURIComponent(
-      shopDomain
-    )}/admin/oauth/authorize?client_id=${SHOPIFY_CLIENT_ID}&scope=${encodeURIComponent(
-      SHOPIFY_SCOPES
-    )}&redirect_uri=${encodeURIComponent(
-      SHOPIFY_REDIRECT_URI
-    )}&state=${encodeURIComponent(state)}`;
+    const redirectUrl = `https://${shopDomain}/admin/oauth/authorize` +
+      `?client_id=${encodeURIComponent(SHOPIFY_CLIENT_ID)}` +
+      `&scope=${encodeURIComponent(SHOPIFY_SCOPES)}` +
+      `&redirect_uri=${encodeURIComponent(SHOPIFY_REDIRECT_URI)}` +
+      `&state=${encodeURIComponent(state)}`;
 
-    console.log("🔗 Shopify install URL:", installUrl);
-
-    return res.redirect(installUrl);
+    return res.redirect(302, redirectUrl);
   } catch (err) {
     console.error("Shopify auth start error:", err);
-    return res.status(500).send("Error starting Shopify auth");
+    return res.status(500).send("Shopify auth start error.");
   }
 });
 
 /**
- * SHOPIFY OAUTH CALLBACK
+ * 🔹 Shopify OAuth CALLBACK
  *
- * Shopify redirects here after merchant installs / approves app:
- *
- * GET /api/shopify/auth/callback?code=...&shop=...&state=...
- *
- * - Validates params
- * - Decodes state to find twitchLogin + shop
- * - Exchanges code -> access_token
- * - Saves token on streamer
- * - Registers orders/create webhook
- * - Redirects back to Dropify dashboard
+ * Configured in your Shopify app as SHOPIFY_REDIRECT_URI
+ * e.g. https://api.dropifybot.com/api/shopify/auth/callback
  */
 router.get("/auth/callback", async (req, res) => {
   try {
     const { code, shop, state } = req.query;
 
     if (!code || !shop || !state) {
-      return res.status(400).send("Missing code, shop or state");
+      return res.status(400).send("Missing required query params.");
     }
 
-    const shopDomain = String(shop);
+    // state must be "login:<twitchLogin>"
+    const parts = String(state).split(":");
+    const stateType = parts[0];
+    const loginFromState = parts[1];
 
-    // Decode state to get twitchLogin etc.
-    let twitchLogin;
-    try {
-      const decoded = JSON.parse(
-        Buffer.from(String(state), "base64url").toString("utf8")
-      );
-      twitchLogin = decoded.t;
-    } catch (e) {
-      console.error("Invalid Shopify state:", state, e);
-      return res.status(400).send("Invalid state");
+    if (stateType !== "login" || !loginFromState) {
+      return res.status(400).send("Invalid state parameter.");
     }
 
-    if (!twitchLogin) {
-      return res.status(400).send("Missing twitchLogin in state");
-    }
+    const twitchLogin = loginFromState.toLowerCase();
 
-    const streamer = await Streamer.findOne({
-      twitchLogin: String(twitchLogin).toLowerCase(),
-    });
-
+    const streamer = await Streamer.findOne({ twitchLogin });
     if (!streamer) {
-      return res.status(404).send("Streamer not found");
+      return res.status(404).send("Streamer not found.");
     }
 
-    // Exchange code for access token
-    const tokenResp = await axios.post(
-      `https://${shopDomain}/admin/oauth/access_token`,
+    if (!SHOPIFY_CLIENT_ID || !SHOPIFY_CLIENT_SECRET) {
+      console.error("Shopify env vars missing.");
+      return res.status(500).send("Shopify config missing on server.");
+    }
+
+    // Exchange code -> access token
+    const tokenRes = await axios.post(
+      `https://${shop}/admin/oauth/access_token`,
       {
         client_id: SHOPIFY_CLIENT_ID,
         client_secret: SHOPIFY_CLIENT_SECRET,
         code,
+      },
+      {
+        headers: {
+          "Content-Type": "application/json",
+        },
       }
     );
 
-    const accessToken = tokenResp.data.access_token;
-
-    // Save Shopify connection info on streamer
-    streamer.shopifyStoreDomain = shopDomain;
-    streamer.shopifyAdminToken = accessToken;
-    await streamer.save();
-
-    console.log(
-      `✅ Shopify connected for ${streamer.twitchLogin} (${shopDomain})`
-    );
-
-    // Try to register orders/create webhook (non-fatal if it fails)
-    try {
-      await ensureOrderCreateWebhook(shopDomain, accessToken);
-    } catch (webhookErr) {
-      console.error("Failed to register Shopify webhook:", webhookErr);
-      // don't block redirect for this
+    const accessToken = tokenRes.data.access_token;
+    if (!accessToken) {
+      console.error("[Shopify callback] No access_token in response:", tokenRes.data);
+      return res.status(500).send("Failed to get Shopify access token.");
     }
 
-    // Redirect back to Dropify dashboard
-    return res.redirect(
-      `https://bot.dropifybot.com/?login=${encodeURIComponent(
-        streamer.twitchLogin
-      )}&shopify=connected`
-    );
+    // Save Shopify connection details on Streamer
+    streamer.shopifyStoreDomain = shop;
+    streamer.shopifyAdminToken = accessToken;
+    streamer.shopifyConnected = true;
+    streamer.shopifyApiVersion = streamer.shopifyApiVersion || "2025-01";
+
+    await streamer.save();
+
+    // Ensure webhook is registered
+    try {
+      await ensureOrderCreateWebhook(shop, accessToken);
+    } catch (webhookErr) {
+      console.error("Error ensuring Shopify orders/create webhook:", webhookErr);
+      // Don't block redirect on webhook failure
+    }
+
+    // Redirect back to dashboard
+    const redirectUrl = `https://bot.dropifybot.com/?login=${encodeURIComponent(
+      twitchLogin
+    )}&shopify=connected`;
+
+    return res.redirect(302, redirectUrl);
   } catch (err) {
-    console.error(
-      "Shopify auth callback error:",
-      err.response?.data || err.message || err
-    );
-    return res
-      .status(500)
-      .send("Error completing Shopify connection. Please try again.");
+    console.error("Shopify OAuth callback error:", err?.response?.data || err);
+    return res.status(500).send("Shopify OAuth callback error.");
   }
 });
 
