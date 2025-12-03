@@ -13,6 +13,7 @@ const shopifyRoutes = require("./routes/shopify");
 const webhookRoutes = require("./routes/webhooks");
 const redemptionsRouter = require("./routes/redemptions");
 const settingsRouter = require("./routes/settings");
+const dropsRouter = require("./routes/drops");
 
 
 // NEW — import Twitch refresh helper
@@ -55,6 +56,7 @@ app.use("/api/shopify", shopifyRoutes);
 app.use("/webhooks", webhookRoutes);
 app.use("/api/redemptions", redemptionsRouter);
 app.use("/api/settings", settingsRouter);
+app.use("/api/drops", dropsRouter);
 
 
 // Connect to MongoDB
