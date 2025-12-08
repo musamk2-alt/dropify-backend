@@ -1,4 +1,5 @@
 // /opt/dropify/Discount API/dropify-backend/routes/drops.js
+// /opt/dropify/Discount API/dropify-backend/routes/drops.js
 const express = require("express");
 const router = express.Router();
 
@@ -8,6 +9,7 @@ const Drop = require("../models/Drop");
  * GET /api/drops/:login/recent?limit=10
  *
  * Returns the most recent drops (discount codes created) for a streamer.
+ * Includes both viewer drops and global drops.
  */
 router.get("/:login/recent", async (req, res) => {
   try {
@@ -31,6 +33,7 @@ router.get("/:login/recent", async (req, res) => {
 
     const mapped = drops.map((d) => ({
       id: d._id,
+      kind: d.kind || "viewer",
       viewerLogin: d.viewerLogin,
       viewerDisplayName: d.viewerDisplayName,
       discountCode: d.discountCode,

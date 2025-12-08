@@ -1,4 +1,5 @@
 // /opt/dropify/Discount API/dropify-backend/models/Drop.js
+// /opt/dropify/Discount API/dropify-backend/models/Drop.js
 const mongoose = require("mongoose");
 
 const DropSchema = new mongoose.Schema(
@@ -12,6 +13,14 @@ const DropSchema = new mongoose.Schema(
     twitchLogin: {
       type: String,
       required: true,
+      index: true,
+    },
+
+    // Kind of drop: viewer personal code or global stream drop
+    kind: {
+      type: String,
+      enum: ["viewer", "global"],
+      default: "viewer",
       index: true,
     },
 

@@ -1,7 +1,8 @@
 // /opt/dropify/Discount API/dropify-backend/services/discounts.js
+// /opt/dropify/Discount API/dropify-backend/services/discounts.js
 require("dotenv").config();
 const axios = require("axios");
-const crypto = require("crypto");
+
 const Streamer = require("../models/Streamer");
 const Drop = require("../models/Drop");
 
@@ -102,7 +103,9 @@ async function createDiscountCode(streamer, priceRuleId, code) {
  * Helper: generate a viewer-friendly code
  */
 function generateCode(prefix, viewerLogin) {
-  const cleanViewer = (viewerLogin || "").toUpperCase().replace(/[^A-Z0-9]/g, "");
+  const cleanViewer = (viewerLogin || "")
+    .toUpperCase()
+    .replace(/[^A-Z0-9]/g, "");
   const random = Math.floor(1000 + Math.random() * 9000);
   return `${prefix}${cleanViewer}-${random}`;
 }
@@ -130,10 +133,6 @@ async function createViewerDiscount(login, viewer) {
   }
 
   const settings = streamer.settings || {};
-  if (!settings) {
-    return { ok: false, reason: "no_settings" };
-  }
-
   const enabled = settings.enabled !== false;
   if (!enabled) {
     return { ok: false, reason: "disabled" };
@@ -173,8 +172,7 @@ async function createViewerDiscount(login, viewer) {
     .lean();
 
   if (lastDrop && lastDrop.createdAt > cutoffForCooldown) {
-    const diffMs =
-      cutoffForCooldown.getTime() - lastDrop.createdAt.getTime();
+    const diffMs = cutoffForCooldown.getTime() - lastDrop.createdAt.getTime();
     const retryAfterSeconds = Math.max(
       1,
       Math.ceil(Math.abs(diffMs) / 1000)
@@ -188,6 +186,7 @@ async function createViewerDiscount(login, viewer) {
       streamerId: streamer._id,
       viewerId: viewer.viewerId,
       createdAt: { $gte: cutoffForStream },
+      kind: "viewer",
     });
 
     if (viewerDropCount >= maxPerViewerPerStream) {
@@ -211,12 +210,17 @@ async function createViewerDiscount(login, viewer) {
     orderMinSubtotal,
   });
 
-  const discount = await createDiscountCode(streamer, priceRule.id, discountCode);
+  const discount = await createDiscountCode(
+    streamer,
+    priceRule.id,
+    discountCode
+  );
 
   // 5) Save Drop record
   const drop = await Drop.create({
     streamerId: streamer._id,
     twitchLogin,
+    kind: "viewer",
     viewerId: viewer.viewerId,
     viewerLogin: viewer.viewerLogin,
     viewerDisplayName: viewer.viewerDisplayName,
@@ -241,13 +245,16 @@ async function createViewerDiscount(login, viewer) {
 }
 
 /**
- * 🔥 GLOBAL STREAM DROP (still available if you want it later)
+ * 🔥 GLOBAL STREAM DROP
+ *
+ * Used by POST /api/discounts/:login/global
  */
 async function createGlobalDrop(streamer, percent) {
+  const twitchLogin = streamer.twitchLogin.toLowerCase();
   const random = Math.floor(1000 + Math.random() * 9999);
   const code = `${streamer.twitchLogin.toUpperCase()}${percent}-${random}`;
 
-  const rule = await createPriceRule(streamer, {
+  const priceRule = await createPriceRule(streamer, {
     discountType: "percentage",
     discountValue: percent,
     usageLimit: null, // unlimited
@@ -255,9 +262,33 @@ async function createGlobalDrop(streamer, percent) {
     orderMinSubtotal: 0,
   });
 
-  const discount = await createDiscountCode(streamer, rule.id, code);
+  const discount = await createDiscountCode(streamer, priceRule.id, code);
 
-  return { code, id: discount.id };
+  // Save as a GLOBAL drop entry
+  const drop = await Drop.create({
+    streamerId: streamer._id,
+    twitchLogin,
+    kind: "global",
+    viewerId: "__global__",
+    viewerLogin: twitchLogin,
+    viewerDisplayName: streamer.displayName || streamer.twitchLogin,
+    discountCode: code,
+    discountType: "percentage",
+    discountValue: percent,
+    metadata: {
+      priceRuleId: priceRule.id,
+      discountId: discount.id,
+      global: true,
+    },
+  });
+
+  return {
+    code,
+    id: discount.id,
+    discountType: "percentage",
+    discountValue: percent,
+    dropId: drop._id,
+  };
 }
 
 module.exports = {

@@ -14,7 +14,7 @@ const webhookRoutes = require("./routes/webhooks");
 const redemptionsRouter = require("./routes/redemptions");
 const settingsRouter = require("./routes/settings");
 const dropsRouter = require("./routes/drops");
-
+const statsRoutes = require("./routes/stats");
 
 // NEW — import Twitch refresh helper
 const { refreshToken } = require("./services/twitchAuth");
@@ -57,6 +57,7 @@ app.use("/webhooks", webhookRoutes);
 app.use("/api/redemptions", redemptionsRouter);
 app.use("/api/settings", settingsRouter);
 app.use("/api/drops", dropsRouter);
+app.use("/api/stats", statsRoutes);
 
 
 // Connect to MongoDB
