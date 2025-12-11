@@ -1,10 +1,10 @@
 // /opt/dropify/Discount API/dropify-backend/services/discounts.js
-// /opt/dropify/Discount API/dropify-backend/services/discounts.js
 require("dotenv").config();
 const axios = require("axios");
 
 const Streamer = require("../models/Streamer");
 const Drop = require("../models/Drop");
+const { ensureDropLimit } = require("./planLimits"); // ⬅ plan limits helper
 
 // Approximate "per stream" window (in ms)
 // Later you can tie this to real Twitch stream sessions.
@@ -198,10 +198,22 @@ async function createViewerDiscount(login, viewer) {
     }
   }
 
-  // 3) Generate code
+  // 3) Plan-based monthly cap (per viewer drop)
+  const limitCheck = await ensureDropLimit({ streamer, kind: "viewer" });
+  if (!limitCheck.ok) {
+    return {
+      ok: false,
+      reason: "plan_limit",
+      code: "DROP_LIMIT_REACHED",
+      message: limitCheck.message,
+      meta: limitCheck,
+    };
+  }
+
+  // 4) Generate code
   const discountCode = generateCode(discountPrefix, viewer.viewerLogin);
 
-  // 4) Create price rule + discount code in Shopify
+  // 5) Create price rule + discount code in Shopify
   const priceRule = await createPriceRule(streamer, {
     discountType,
     discountValue,
@@ -216,7 +228,7 @@ async function createViewerDiscount(login, viewer) {
     discountCode
   );
 
-  // 5) Save Drop record
+  // 6) Save Drop record
   const drop = await Drop.create({
     streamerId: streamer._id,
     twitchLogin,

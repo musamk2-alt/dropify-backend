@@ -1,5 +1,7 @@
 // server.js
-require("dotenv").config();
+const path = require("path");
+require("dotenv").config({ path: path.join(__dirname, ".env") });
+
 const rateLimit = require("express-rate-limit");
 const express = require("express");
 const cors = require("cors");
@@ -15,6 +17,7 @@ const redemptionsRouter = require("./routes/redemptions");
 const settingsRouter = require("./routes/settings");
 const dropsRouter = require("./routes/drops");
 const statsRoutes = require("./routes/stats");
+const planRoutes = require("./routes/plan");
 
 // NEW — import Twitch refresh helper
 const { refreshToken } = require("./services/twitchAuth");
@@ -58,7 +61,7 @@ app.use("/api/redemptions", redemptionsRouter);
 app.use("/api/settings", settingsRouter);
 app.use("/api/drops", dropsRouter);
 app.use("/api/stats", statsRoutes);
-
+app.use("/api/plan", planRoutes);
 
 // Connect to MongoDB
 mongoose.connect(process.env.MONGO_URI)

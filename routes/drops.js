@@ -1,5 +1,5 @@
-// /opt/dropify/Discount API/dropify-backend/routes/drops.js
-// /opt/dropify/Discount API/dropify-backend/routes/drops.js
+// /var/www/dropify-backend/routes/drops.js
+
 const express = require("express");
 const router = express.Router();
 
@@ -26,19 +26,21 @@ router.get("/:login/recent", async (req, res) => {
       });
     }
 
+    // Fetch from MongoDB
     const drops = await Drop.find({ twitchLogin: login })
       .sort({ createdAt: -1 })
       .limit(limit)
       .lean();
 
+    // Map into clean, frontend-friendly format
     const mapped = drops.map((d) => ({
       id: d._id,
-      kind: d.kind || "viewer",
-      viewerLogin: d.viewerLogin,
-      viewerDisplayName: d.viewerDisplayName,
+      kind: d.kind === "global" ? "global" : "viewer",
+      viewerLogin: d.viewerLogin || null,
+      viewerDisplayName: d.viewerDisplayName || null,
       discountCode: d.discountCode,
-      discountType: d.discountType,
-      discountValue: d.discountValue,
+      discountType: d.discountType || null,
+      discountValue: d.discountValue || null,
       createdAt: d.createdAt,
     }));
 
