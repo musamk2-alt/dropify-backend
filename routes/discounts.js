@@ -3,12 +3,17 @@ const express = require("express");
 const router = express.Router();
 
 const Streamer = require("../models/Streamer");
-const { createViewerDiscount, createGlobalDrop } = require("../services/discounts");
+const {
+  createViewerDiscount,
+  createGlobalDrop,
+} = require("../services/discounts");
 const { ensureDropLimit } = require("../services/planLimits");
 
 /**
  * POST /api/discounts/:login
  * Viewer personal discount code (kind: "viewer")
+ *
+ * Body: { viewerId, viewerLogin, viewerDisplayName }
  */
 router.post("/:login", async (req, res) => {
   try {
@@ -25,13 +30,13 @@ router.post("/:login", async (req, res) => {
       });
     }
 
-    // Load streamer so we can enforce plan limit
+    // Load streamer so we can enforce plan limit + settings-aware service logic
     const streamer = await Streamer.findOne({ twitchLogin: login });
     if (!streamer) {
       return res.status(404).json({ ok: false, reason: "not_found" });
     }
 
-    // ✅ Enforce viewer plan limit BEFORE creation
+    // ✅ Enforce plan limit BEFORE creation (viewer)
     const limitCheck = await ensureDropLimit({ streamer, kind: "viewer" });
     if (!limitCheck.ok) {
       return res.status(429).json({
@@ -44,13 +49,15 @@ router.post("/:login", async (req, res) => {
       });
     }
 
-    // Create viewer discount (this already creates the Drop row)
+    // Create viewer discount (your service creates the Drop row)
     const result = await createViewerDiscount(login, {
       viewerId: String(viewerId),
       viewerLogin: String(viewerLogin).toLowerCase(),
       viewerDisplayName: viewerDisplayName || viewerLogin,
     });
 
+    // If service returns its own structured failures, pass through as 200
+    // (example: disabled, cooldown, not_connected, limit_reached, not_found)
     return res.status(200).json(result);
   } catch (err) {
     console.error("❌ Error in POST /api/discounts/:login", err);
@@ -61,7 +68,8 @@ router.post("/:login", async (req, res) => {
 /**
  * POST /api/discounts/:login/global
  * Global drop (kind: "global")
- * Body: { percent: number }
+ *
+ * Body: { percent: number }  (1..50)
  */
 router.post("/:login/global", async (req, res) => {
   try {
@@ -83,7 +91,7 @@ router.post("/:login/global", async (req, res) => {
       return res.status(404).json({ ok: false, error: "Streamer not found" });
     }
 
-    // ✅ Enforce global plan limit BEFORE creation
+    // ✅ Enforce plan limit BEFORE creation (global)
     const limitCheck = await ensureDropLimit({ streamer, kind: "global" });
     if (!limitCheck.ok) {
       return res.status(429).json({
@@ -96,12 +104,12 @@ router.post("/:login/global", async (req, res) => {
       });
     }
 
-    // Create global drop (this already creates the Drop row)
+    // Create global drop (your service creates the Drop row)
     const drop = await createGlobalDrop(streamer, percent);
 
     return res.status(200).json({
       ok: true,
-      drop, // contains code, dropId, etc.
+      drop, // { code, id, discountType, discountValue, dropId }
     });
   } catch (err) {
     console.error("❌ Error in POST /api/discounts/:login/global", err);

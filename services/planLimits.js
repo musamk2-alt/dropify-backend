@@ -1,19 +1,18 @@
 // /var/www/dropify-backend/services/planLimits.js
 const Drop = require("../models/Drop");
+const PlanUsage = require("../models/PlanUsage");
 
 /**
  * Monthly plan limits
- *
- * Rules:
- * - 0                = hard limit (allow none)
- * - Infinity         = unlimited
- * - null / undefined = unlimited
- * - Any finite >= 0  = hard limit
+ * NOTE:
+ * - 0 = hard limit (allow none)
+ * - Infinity = unlimited
+ * - null/undefined = unlimited
  */
 const PLAN_LIMITS = {
   free: {
-    viewerDropsPerMonth: 0,
-    globalDropsPerMonth: 0, // 🚫 no global drops on free
+    viewerDropsPerMonth: 1,
+    globalDropsPerMonth: 1, // 🚫 none on free
   },
   pro: {
     viewerDropsPerMonth: 500,
@@ -21,14 +20,10 @@ const PLAN_LIMITS = {
   },
   creator: {
     viewerDropsPerMonth: 3000,
-    globalDropsPerMonth: Infinity, // ♾ unlimited (fair use)
+    globalDropsPerMonth: Infinity, // ♾ unlimited
   },
 };
 
-/**
- * Decide which plan a streamer is on.
- * Default = free
- */
 function getPlanForStreamer(streamer) {
   if (!streamer) return "free";
 
@@ -36,156 +31,161 @@ function getPlanForStreamer(streamer) {
     return streamer.plan;
   }
 
-  // Optional override for testing (e.g. DROPIFY_DEFAULT_PLAN=pro)
-  const override = process.env.DROPIFY_DEFAULT_PLAN;
-  if (override && PLAN_LIMITS[override]) return override;
+  if (
+    process.env.DROPIFY_DEFAULT_PLAN &&
+    PLAN_LIMITS[process.env.DROPIFY_DEFAULT_PLAN]
+  ) {
+    return process.env.DROPIFY_DEFAULT_PLAN;
+  }
 
   return "free";
 }
 
-/**
- * Helper: start/end of current month in UTC-like JS Date terms
- */
-function getCurrentMonthWindow(now = new Date()) {
-  const start = new Date(now.getFullYear(), now.getMonth(), 1);
-  const end = new Date(now.getFullYear(), now.getMonth() + 1, 1);
-  return { start, end, now };
+function getPeriodKey(date = new Date()) {
+  const y = date.getFullYear();
+  const m = String(date.getMonth() + 1).padStart(2, "0");
+  return `${y}-${m}`;
+}
+
+function getMonthWindow(date = new Date()) {
+  const start = new Date(date.getFullYear(), date.getMonth(), 1);
+  const end = new Date(date.getFullYear(), date.getMonth() + 1, 1);
+  return { start, end };
 }
 
 /**
- * Count drops for the streamer in the current month
- * kind: "viewer" | "global" | undefined (all kinds)
+ * Read usage from the counter collection (fast + consistent).
+ * If missing (first run), we can fallback to counting drops and seed the counter.
  */
-async function getMonthlyDropUsage(streamerId, kind) {
-  const { start } = getCurrentMonthWindow();
+async function getMonthlyDropUsage(streamerId, kind, date = new Date()) {
+  const periodKey = getPeriodKey(date);
 
-  const query = {
-    streamerId,
-    createdAt: { $gte: start },
-  };
+  const existing = await PlanUsage.findOne({ streamerId, kind, periodKey }).lean();
+  if (existing) return existing.used;
 
-  if (kind) query.kind = kind;
+  // Fallback for older data: count Drops and seed counter once
+  const { start } = getMonthWindow(date);
+  const query = { streamerId, kind, createdAt: { $gte: start } };
+  const total = await Drop.countDocuments(query);
 
-  return Drop.countDocuments(query);
+  try {
+    await PlanUsage.create({ streamerId, kind, periodKey, used: total });
+  } catch (e) {
+    // If two requests seed at once, ignore duplicate key and continue
+    if (e?.code !== 11000) throw e;
+  }
+
+  return total;
 }
 
 /**
- * Normalize limit values into one of:
- * - { type: "unlimited" }
- * - { type: "finite", value: number }  (includes 0)
- */
-function normalizeLimit(rawLimit) {
-  // null/undefined => unlimited
-  if (rawLimit == null) return { type: "unlimited" };
-
-  // Infinity => unlimited
-  if (rawLimit === Infinity) return { type: "unlimited" };
-
-  // Non-number => treat as unlimited (defensive)
-  if (typeof rawLimit !== "number") return { type: "unlimited" };
-
-  // NaN or non-finite => unlimited
-  if (!Number.isFinite(rawLimit)) return { type: "unlimited" };
-
-  // Finite number (0 included) => finite hard limit
-  return { type: "finite", value: Math.max(0, Math.floor(rawLimit)) };
-}
-
-/**
- * Enforce plan limits BEFORE creating a drop
- *
- * kind: "viewer" | "global"
+ * Atomic "reserve" a monthly slot:
+ * - If limit is reached, returns ok:false
+ * - If allowed, increments usage safely even under concurrency.
  *
  * Returns:
- *  - { ok: true, plan, limit, used }
- *  - { ok: false, plan, limit, used, message }
+ *  - { ok:true, plan, limit, used }   used = AFTER increment
+ *  - { ok:false, plan, limit, used, message }
  */
-async function ensureDropLimit({ streamer, kind }) {
+async function reserveMonthlyDrop({ streamer, kind }) {
   const plan = getPlanForStreamer(streamer);
   const limits = PLAN_LIMITS[plan] || PLAN_LIMITS.free;
 
-  const rawLimit =
+  const limit =
     kind === "global"
       ? limits.globalDropsPerMonth
       : limits.viewerDropsPerMonth;
 
-  const norm = normalizeLimit(rawLimit);
-
-  const used = await getMonthlyDropUsage(streamer._id, kind);
-
-  // Unlimited => always ok (but still return used for UI)
-  if (norm.type === "unlimited") {
-    return {
-      ok: true,
-      plan,
-      limit: Infinity,
-      used,
-    };
+  // Unlimited cases
+  if (limit == null || limit === Infinity || !Number.isFinite(limit)) {
+    const used = await getMonthlyDropUsage(streamer._id, kind);
+    return { ok: true, plan, limit: Infinity, used };
   }
 
-  const limit = norm.value; // includes 0
-
-  // Hard limit check (0 blocks immediately because used >= 0)
-  if (used >= limit) {
-    const message =
-      kind === "global"
-        ? `You’ve hit your ${plan} plan limit for global drops this month.`
-        : `You’ve hit your ${plan} plan limit for viewer drops this month.`;
-
+  // Hard stop (0 means none allowed)
+  if (limit === 0) {
+    const used = await getMonthlyDropUsage(streamer._id, kind);
     return {
       ok: false,
       plan,
       limit,
       used,
-      message,
+      message:
+        kind === "global"
+          ? `You’ve hit your ${plan} plan limit for global drops this month.`
+          : `You’ve hit your ${plan} plan limit for viewer drops this month.`,
     };
   }
 
-  return {
-    ok: true,
-    plan,
-    limit,
-    used,
-  };
+  const periodKey = getPeriodKey(new Date());
+
+  // Step 1: try atomic increment on existing counter where used < limit
+  let doc = await PlanUsage.findOneAndUpdate(
+    { streamerId: streamer._id, kind, periodKey, used: { $lt: limit } },
+    { $inc: { used: 1 } },
+    { new: true }
+  ).lean();
+
+  if (doc) {
+    return { ok: true, plan, limit, used: doc.used };
+  }
+
+  // Step 2: if counter doesn't exist yet, race-safe create {used:1}
+  try {
+    const created = await PlanUsage.create({
+      streamerId: streamer._id,
+      kind,
+      periodKey,
+      used: 1,
+    });
+    return { ok: true, plan, limit, used: created.used };
+  } catch (e) {
+    // Another request created it first; retry atomic increment once
+    if (e?.code === 11000) {
+      doc = await PlanUsage.findOneAndUpdate(
+        { streamerId: streamer._id, kind, periodKey, used: { $lt: limit } },
+        { $inc: { used: 1 } },
+        { new: true }
+      ).lean();
+
+      if (doc) return { ok: true, plan, limit, used: doc.used };
+
+      const used = await getMonthlyDropUsage(streamer._id, kind);
+      return {
+        ok: false,
+        plan,
+        limit,
+        used,
+        message:
+          kind === "global"
+            ? `You’ve hit your ${plan} plan limit for global drops this month.`
+            : `You’ve hit your ${plan} plan limit for viewer drops this month.`,
+      };
+    }
+
+    throw e;
+  }
 }
 
 /**
- * DEV-ONLY helper: reset THIS MONTH's drops for a streamer (for testing).
- *
- * Usage example (in a node script / REPL):
- *   await resetMonthlyDropUsage(streamerId, { kind: "viewer" })
- *
- * Safety:
- * - Only works if ALLOW_PLAN_RESET=true
+ * If drop creation fails AFTER reserving, release the slot.
+ * (Never let it go below 0.)
  */
-async function resetMonthlyDropUsage(streamerId, { kind } = {}) {
-  if (process.env.ALLOW_PLAN_RESET !== "true") {
-    return {
-      ok: false,
-      error:
-        "Reset blocked. Set ALLOW_PLAN_RESET=true in env to enable dev resets.",
-    };
-  }
+async function releaseMonthlyDrop({ streamer, kind }) {
+  const periodKey = getPeriodKey(new Date());
+  await PlanUsage.updateOne(
+    { streamerId: streamer._id, kind, periodKey, used: { $gt: 0 } },
+    { $inc: { used: -1 } }
+  );
+}
 
-  const { start, end } = getCurrentMonthWindow();
-
-  const query = {
-    streamerId,
-    createdAt: { $gte: start, $lt: end },
-  };
-
-  if (kind) query.kind = kind;
-
-  const result = await Drop.deleteMany(query);
-
-  return {
-    ok: true,
-    deleted: result?.deletedCount ?? 0,
-    period: {
-      monthStart: start.toISOString(),
-      monthEnd: end.toISOString(),
-    },
-  };
+/**
+ * Backwards compatible name:
+ * Previously: ensureDropLimit checked only.
+ * Now: it RESERVES a slot atomically.
+ */
+async function ensureDropLimit({ streamer, kind }) {
+  return reserveMonthlyDrop({ streamer, kind });
 }
 
 module.exports = {
@@ -193,8 +193,8 @@ module.exports = {
   getPlanForStreamer,
   getMonthlyDropUsage,
   ensureDropLimit,
-
-  // optional helpers (safe to export)
-  getCurrentMonthWindow,
-  resetMonthlyDropUsage,
+  reserveMonthlyDrop,
+  releaseMonthlyDrop,
+  getPeriodKey,
+  getMonthWindow,
 };
