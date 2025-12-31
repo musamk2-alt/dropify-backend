@@ -25,11 +25,12 @@ router.post("/create-checkout", async (req, res) => {
     const streamer = await Streamer.findOne({ twitchLogin: login });
     if (!streamer) return res.status(404).json({ ok: false, error: "Streamer not found" });
 
+    // IMPORTANT: dashboard lives on bot.dropifybot.com (3000) not dropifybot.com (frontpage 3001)
     const session = await stripe.checkout.sessions.create({
       mode: "subscription",
       line_items: [{ price: priceId, quantity: 1 }],
-      success_url: `https://dropifybot.com/dashboard?login=${encodeURIComponent(login)}&upgrade=success`,
-      cancel_url: `https://dropifybot.com/dashboard?login=${encodeURIComponent(login)}&upgrade=cancel`,
+      success_url: `https://bot.dropifybot.com/dashboard?login=${encodeURIComponent(login)}&upgrade=success`,
+      cancel_url: `https://bot.dropifybot.com/dashboard?login=${encodeURIComponent(login)}&upgrade=cancel`,
       client_reference_id: login,
       metadata: { twitchLogin: login, plan },
     });
@@ -41,14 +42,18 @@ router.post("/create-checkout", async (req, res) => {
   }
 });
 
-// POST /api/stripe/webhook  (RAW body!)
+// POST /api/stripe/webhook  (RAW body preferred)
 router.post("/webhook", async (req, res) => {
   const sig = req.headers["stripe-signature"];
   let event;
 
   try {
+    // If your server.js stores raw body as req.rawBody, use it.
+    // If your webhook is mounted with express.raw(), then req.body is already a Buffer.
+    const payload = req.rawBody || req.body;
+
     event = stripe.webhooks.constructEvent(
-      req.body,
+      payload,
       sig,
       process.env.STRIPE_WEBHOOK_SECRET
     );
@@ -73,12 +78,18 @@ router.post("/webhook", async (req, res) => {
           }
         );
         console.log(`✅ Upgraded ${login} to ${plan}`);
+      } else {
+        console.warn("⚠️ checkout.session.completed missing metadata", {
+          hasLogin: !!login,
+          hasPlan: !!plan,
+        });
       }
     }
 
     return res.json({ received: true });
   } catch (err) {
     console.error("❌ Stripe webhook handler error", err);
+    // still acknowledge to prevent Stripe retry storms
     return res.status(500).json({ received: true });
   }
 });
