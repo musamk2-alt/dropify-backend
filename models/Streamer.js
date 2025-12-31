@@ -76,6 +76,14 @@ const StreamerSchema = new mongoose.Schema(
     shopifyAdminToken: { type: String },
     shopifyApiVersion: { type: String },
 
+    // ✅ PLAN + BILLING
+    plan: { type: String, default: "free", index: true },
+    stripeCustomerId: { type: String, default: null },
+    stripeSubscriptionId: { type: String, default: null },
+
+    // ✅ PER-STREAM WINDOW START
+    currentStreamStartedAt: { type: Date, default: null },
+
     // Dropify settings (per streamer)
     settings: {
       type: StreamerSettingsSchema,

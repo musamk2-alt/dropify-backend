@@ -1,3 +1,4 @@
+// /var/www/dropify-backend/models/PlanUsage.js
 const mongoose = require("mongoose");
 
 const PlanUsageSchema = new mongoose.Schema(
@@ -14,8 +15,9 @@ const PlanUsageSchema = new mongoose.Schema(
       required: true,
       index: true,
     },
+    // e.g. "2025-12"
     periodKey: {
-      type: String, // "YYYY-MM"
+      type: String,
       required: true,
       index: true,
     },
@@ -28,7 +30,10 @@ const PlanUsageSchema = new mongoose.Schema(
   { timestamps: true }
 );
 
-// Unique per streamer+kind+month
-PlanUsageSchema.index({ streamerId: 1, kind: 1, periodKey: 1 }, { unique: true });
+// One counter doc per streamer/kind/month
+PlanUsageSchema.index(
+  { streamerId: 1, kind: 1, periodKey: 1 },
+  { unique: true }
+);
 
 module.exports = mongoose.model("PlanUsage", PlanUsageSchema);

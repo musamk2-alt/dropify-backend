@@ -18,6 +18,7 @@ const settingsRouter = require("./routes/settings");
 const dropsRouter = require("./routes/drops");
 const statsRoutes = require("./routes/stats");
 const planRoutes = require("./routes/plan");
+const stripeRoutes = require("./routes/stripe");
 
 // NEW — import Twitch refresh helper
 const { refreshToken } = require("./services/twitchAuth");
@@ -62,6 +63,8 @@ app.use("/api/settings", settingsRouter);
 app.use("/api/drops", dropsRouter);
 app.use("/api/stats", statsRoutes);
 app.use("/api/plan", planRoutes);
+app.use("/api/stripe/webhook", express.raw({ type: "application/json" }));
+app.use("/api/stripe", stripeRoutes);
 
 // Connect to MongoDB
 mongoose.connect(process.env.MONGO_URI)

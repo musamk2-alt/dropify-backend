@@ -74,4 +74,28 @@ router.get("/:login", async (req, res) => {
   }
 });
 
+// POST /api/plan/:login/reset-stream
+router.post("/:login/reset-stream", async (req, res) => {
+  try {
+    const login = (req.params.login || "").toLowerCase();
+    if (!login) return res.status(400).json({ ok: false, error: "login is required" });
+
+    const streamer = await Streamer.findOne({ twitchLogin: login });
+    if (!streamer) return res.status(404).json({ ok: false, error: "Streamer not found" });
+
+    streamer.currentStreamStartedAt = new Date();
+    await streamer.save();
+
+    return res.json({
+      ok: true,
+      message: "Stream usage reset. Viewer drops now count from this moment.",
+      currentStreamStartedAt: streamer.currentStreamStartedAt.toISOString(),
+    });
+  } catch (err) {
+    console.error("❌ Error in POST /api/plan/:login/reset-stream", err);
+    return res.status(500).json({ ok: false, error: "Internal server error" });
+  }
+});
+
+
 module.exports = router;
