@@ -6,7 +6,14 @@ const Streamer = require("../models/Streamer");
 const Drop = require("../models/Drop");
 
 const { createViewerDiscount, createGlobalDrop } = require("../services/discounts");
-const { PLAN_LIMITS, getPlanForStreamer, reserveDrop, releaseDrop } = require("../services/planLimits");
+
+// ✅ FIX: use the actual atomic plan counter functions
+const {
+  PLAN_LIMITS,
+  getPlanForStreamer,
+  reserveMonthlyDrop,
+  releaseMonthlyDrop,
+} = require("../services/planLimits");
 
 function secondsSince(date) {
   return Math.floor((Date.now() - new Date(date).getTime()) / 1000);
@@ -62,8 +69,8 @@ router.post("/:login", async (req, res) => {
       }
     }
 
-    // ✅ reserve slot BEFORE doing any expensive work
-    slot = await reserveDrop({ streamer, kind: "viewer" });
+    // ✅ reserve slot BEFORE doing any expensive work (atomic)
+    slot = await reserveMonthlyDrop({ streamer, kind: "viewer" });
     if (!slot.ok) {
       return res.status(429).json({
         ok: false,
@@ -84,7 +91,7 @@ router.post("/:login", async (req, res) => {
 
     // If service fails, release reserved slot (using correct periodKey)
     if (!result?.ok) {
-      await releaseDrop({ streamer, kind: "viewer", periodKey: slot.periodKey });
+      await releaseMonthlyDrop({ streamer, kind: "viewer", periodKey: slot.periodKey });
       return res.status(200).json(result);
     }
 
@@ -100,7 +107,7 @@ router.post("/:login", async (req, res) => {
     // release if we reserved a slot
     if (streamer && slot?.ok) {
       try {
-        await releaseDrop({ streamer, kind: "viewer", periodKey: slot.periodKey });
+        await releaseMonthlyDrop({ streamer, kind: "viewer", periodKey: slot.periodKey });
       } catch (_) {}
     }
 
@@ -161,8 +168,8 @@ router.post("/:login/global", async (req, res) => {
       }
     }
 
-    // ✅ reserve slot (global monthly)
-    slot = await reserveDrop({ streamer, kind: "global" });
+    // ✅ reserve slot (global monthly) (atomic)
+    slot = await reserveMonthlyDrop({ streamer, kind: "global" });
     if (!slot.ok) {
       return res.status(429).json({
         ok: false,
@@ -178,7 +185,7 @@ router.post("/:login/global", async (req, res) => {
     const drop = await createGlobalDrop(streamer, percent);
 
     if (!drop) {
-      await releaseDrop({ streamer, kind: "global", periodKey: slot.periodKey });
+      await releaseMonthlyDrop({ streamer, kind: "global", periodKey: slot.periodKey });
       return res.status(500).json({ ok: false, error: "Failed to create global drop" });
     }
 
@@ -193,7 +200,7 @@ router.post("/:login/global", async (req, res) => {
 
     if (streamer && slot?.ok) {
       try {
-        await releaseDrop({ streamer, kind: "global", periodKey: slot.periodKey });
+        await releaseMonthlyDrop({ streamer, kind: "global", periodKey: slot.periodKey });
       } catch (_) {}
     }
 

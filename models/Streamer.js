@@ -81,6 +81,22 @@ const StreamerSchema = new mongoose.Schema(
     stripeCustomerId: { type: String, default: null },
     stripeSubscriptionId: { type: String, default: null },
 
+    // ✅ NEW: lifecycle state (period-end downgrade support)
+    billingStatus: {
+      type: String,
+      default: "free",
+      // examples: free | active | canceling | past_due | canceled
+    },
+    pendingPlan: {
+      type: String,
+      default: null,
+      // examples: free | pro | creator (applied at period end)
+    },
+    currentPeriodEnd: {
+      type: Date,
+      default: null,
+    },
+
     // ✅ PER-STREAM WINDOW START
     currentStreamStartedAt: { type: Date, default: null },
 
@@ -95,7 +111,7 @@ const StreamerSchema = new mongoose.Schema(
   }
 );
 
-// You may already have this index, but it's safe to define/redefine
-StreamerSchema.index({ twitchLogin: 1 });
+// ✅ Removed duplicate index declaration to avoid Mongoose warning.
+// twitchLogin already has "index: true" above.
 
 module.exports = mongoose.model("Streamer", StreamerSchema);

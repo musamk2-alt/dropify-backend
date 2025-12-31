@@ -51,6 +51,14 @@ router.get("/:login", async (req, res) => {
     return res.json({
       ok: true,
       plan,
+
+      // ✅ NEW: billing lifecycle state (optional, non-breaking)
+      billingStatus: streamer.billingStatus || null,
+      pendingPlan: streamer.pendingPlan ?? null,
+      currentPeriodEnd: streamer.currentPeriodEnd
+        ? new Date(streamer.currentPeriodEnd).toISOString()
+        : null,
+
       limits: {
         viewerDropsPerMonth: limits.viewerDropsPerMonth ?? null,
         globalDropsPerMonth: limits.globalDropsPerMonth ?? null,
@@ -96,6 +104,5 @@ router.post("/:login/reset-stream", async (req, res) => {
     return res.status(500).json({ ok: false, error: "Internal server error" });
   }
 });
-
 
 module.exports = router;
