@@ -27,32 +27,54 @@ const Streamer = require("./models/Streamer");
 const app = express();
 app.set("trust proxy", 1); // trust first proxy (NGINX)
 
-app.use(cors({
-  origin: [
-    "https://dropifybot.com",
-    "https://www.dropifybot.com",
-    "https://bot.dropifybot.com",
-    "https://api.dropifybot.com"
-  ],
-  credentials: true
-}));
+/* =======================
+   CORS
+   ======================= */
+app.use(
+  cors({
+    origin: [
+      "https://dropifybot.com",
+      "https://www.dropifybot.com",
+      "https://bot.dropifybot.com",
+      "https://api.dropifybot.com",
+    ],
+    credentials: true,
+  })
+);
 
-app.use(express.json());
+/* =======================
+   BODY PARSER (CRITICAL)
+   - Saves raw body for Stripe webhook
+   ======================= */
+app.use(
+  express.json({
+    verify: (req, res, buf) => {
+      if (req.originalUrl === "/api/stripe/webhook") {
+        req.rawBody = buf; // Buffer needed for Stripe signature
+      }
+    },
+  })
+);
+
+/* =======================
+   RATE LIMIT
+   ======================= */
 const apiLimiter = rateLimit({
   windowMs: 60 * 1000, // 1 minute
-  max: 120,            // Max 120 requests/min per IP
-  message: { ok: false, error: "Too many requests, slow down." }
+  max: 120,
+  message: { ok: false, error: "Too many requests, slow down." },
 });
 
-// Simple root route so hitting https://api.dropifybot.com/ doesn't 404
+// Root health route
 app.get("/", (req, res) => {
-  res.send("Dropify API is running. Use the Dropify dashboard to connect Twitch + Shopify.");
+  res.send("Dropify API is running.");
 });
-
 
 app.use("/api/", apiLimiter);
 
-// Routes
+/* =======================
+   ROUTES
+   ======================= */
 app.use("/api/auth", authRoutes);
 app.use("/api/streamers", streamerRoutes);
 app.use("/api/discounts", discountRoutes);
@@ -63,18 +85,24 @@ app.use("/api/settings", settingsRouter);
 app.use("/api/drops", dropsRouter);
 app.use("/api/stats", statsRoutes);
 app.use("/api/plan", planRoutes);
-app.use("/api/stripe/webhook", express.raw({ type: "application/json" }));
+
+// ✅ Stripe routes (webhook lives INSIDE this router)
 app.use("/api/stripe", stripeRoutes);
 
-// Connect to MongoDB
-mongoose.connect(process.env.MONGO_URI)
+/* =======================
+   MONGODB
+   ======================= */
+mongoose
+  .connect(process.env.MONGO_URI)
   .then(() => console.log("✅ MongoDB connected"))
   .catch((err) => console.error("Mongo error:", err));
 
-// ⭐️ STEP 8 — Auto-refresh Cron Job
+/* =======================
+   TOKEN AUTO-REFRESH CRON
+   ======================= */
 setInterval(async () => {
   const streamers = await Streamer.find({});
-  if (!streamers.length) return; // nothing to log
+  if (!streamers.length) return;
 
   console.log(`⏳ Checking token status for ${streamers.length} streamer(s)...`);
 
@@ -82,14 +110,15 @@ setInterval(async () => {
     if (!s.expiresAt) continue;
 
     const expiresIn = s.expiresAt - Date.now();
-
     if (expiresIn < 10 * 60 * 1000) {
       await refreshToken(s);
     }
   }
 }, 5 * 60 * 1000);
 
-
+/* =======================
+   START SERVER
+   ======================= */
 const PORT = process.env.PORT || 4000;
 app.listen(PORT, () => {
   console.log(`Server running http://localhost:${PORT}`);
