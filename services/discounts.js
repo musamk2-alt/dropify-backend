@@ -1,10 +1,9 @@
-// /opt/dropify/Discount API/dropify-backend/services/discounts.js
+// /var/www/dropify-backend/services/discounts.js
 require("dotenv").config();
 const axios = require("axios");
 
 const Streamer = require("../models/Streamer");
 const Drop = require("../models/Drop");
-const { ensureDropLimit } = require("./planLimits"); // ⬅ plan limits helper
 
 // Approximate "per stream" window (in ms)
 // Later you can tie this to real Twitch stream sessions.
@@ -115,12 +114,19 @@ function generateCode(prefix, viewerLogin) {
  *
  * New signature used by route + bot:
  *   createViewerDiscount(login, { viewerId, viewerLogin, viewerDisplayName })
+ * 
+ * ⚠️ IMPORTANT: This function does NOT check plan limits!
+ * The route (routes/discounts.js) handles plan limit checking via reserveMonthlyDrop.
+ * This function only creates the Shopify discount and saves the Drop record.
  */
 async function createViewerDiscount(login, viewer) {
+  console.log(`📝 [CREATE-DISCOUNT] START - Login: ${login}, Viewer: ${viewer.viewerLogin}`);
+  
   const twitchLogin = (login || "").toLowerCase();
 
   const streamer = await Streamer.findOne({ twitchLogin });
   if (!streamer) {
+    console.log(`📝 [CREATE-DISCOUNT] ERROR: Streamer not found`);
     return { ok: false, reason: "not_found" };
   }
 
@@ -129,12 +135,14 @@ async function createViewerDiscount(login, viewer) {
     !streamer.shopifyStoreDomain ||
     !streamer.shopifyAdminToken
   ) {
+    console.log(`📝 [CREATE-DISCOUNT] ERROR: Shopify not connected`);
     return { ok: false, reason: "not_connected" };
   }
 
   const settings = streamer.settings || {};
   const enabled = settings.enabled !== false;
   if (!enabled) {
+    console.log(`📝 [CREATE-DISCOUNT] ERROR: Discounts disabled`);
     return { ok: false, reason: "disabled" };
   }
 
@@ -164,7 +172,7 @@ async function createViewerDiscount(login, viewer) {
     now.getTime() - globalCooldownSeconds * 1000
   );
 
-  // 1) Global cooldown check
+  // 1) Global cooldown check (legacy - route now handles this)
   const lastDrop = await Drop.findOne({
     streamerId: streamer._id,
   })
@@ -177,6 +185,7 @@ async function createViewerDiscount(login, viewer) {
       1,
       Math.ceil(Math.abs(diffMs) / 1000)
     );
+    console.log(`📝 [CREATE-DISCOUNT] ERROR: Global cooldown (${retryAfterSeconds}s)`);
     return { ok: false, reason: "cooldown", retryAfterSeconds };
   }
 
@@ -190,6 +199,7 @@ async function createViewerDiscount(login, viewer) {
     });
 
     if (viewerDropCount >= maxPerViewerPerStream) {
+      console.log(`📝 [CREATE-DISCOUNT] ERROR: Viewer limit reached (${viewerDropCount}/${maxPerViewerPerStream})`);
       return {
         ok: false,
         reason: "limit_reached",
@@ -198,22 +208,15 @@ async function createViewerDiscount(login, viewer) {
     }
   }
 
-  // 3) Plan-based monthly cap (per viewer drop)
-  const limitCheck = await ensureDropLimit({ streamer, kind: "viewer" });
-  if (!limitCheck.ok) {
-    return {
-      ok: false,
-      reason: "plan_limit",
-      code: "DROP_LIMIT_REACHED",
-      message: limitCheck.message,
-      meta: limitCheck,
-    };
-  }
+  // ✅ REMOVED: Plan limit check (route handles this now)
+  // The route calls reserveMonthlyDrop BEFORE calling this function
 
-  // 4) Generate code
+  // 3) Generate code
+  console.log(`📝 [CREATE-DISCOUNT] Generating discount code...`);
   const discountCode = generateCode(discountPrefix, viewer.viewerLogin);
 
-  // 5) Create price rule + discount code in Shopify
+  // 4) Create price rule + discount code in Shopify
+  console.log(`📝 [CREATE-DISCOUNT] Creating Shopify price rule...`);
   const priceRule = await createPriceRule(streamer, {
     discountType,
     discountValue,
@@ -222,13 +225,15 @@ async function createViewerDiscount(login, viewer) {
     orderMinSubtotal,
   });
 
+  console.log(`📝 [CREATE-DISCOUNT] Creating Shopify discount code...`);
   const discount = await createDiscountCode(
     streamer,
     priceRule.id,
     discountCode
   );
 
-  // 6) Save Drop record
+  // 5) Save Drop record
+  console.log(`📝 [CREATE-DISCOUNT] Saving Drop to database...`);
   const drop = await Drop.create({
     streamerId: streamer._id,
     twitchLogin,
@@ -245,6 +250,8 @@ async function createViewerDiscount(login, viewer) {
     },
   });
 
+  console.log(`✅ [CREATE-DISCOUNT] SUCCESS - Drop ID: ${drop._id}, Code: ${discountCode}`);
+
   return {
     ok: true,
     discountCode,
@@ -260,6 +267,7 @@ async function createViewerDiscount(login, viewer) {
  * 🔥 GLOBAL STREAM DROP
  *
  * Used by POST /api/discounts/:login/global
+ * ⚠️ Route handles plan limit checking, this function only creates the discount
  */
 async function createGlobalDrop(streamer, percent) {
   const twitchLogin = streamer.twitchLogin.toLowerCase();

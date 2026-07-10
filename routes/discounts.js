@@ -19,99 +19,179 @@ function secondsSince(date) {
   return Math.floor((Date.now() - new Date(date).getTime()) / 1000);
 }
 
+// ==========================================
+// 🔒 REQUEST DEDUPLICATION (RACE CONDITION FIX)
+// ==========================================
+const activeRequests = new Map();
+
+function createRequestKey(login, viewerId) {
+  return `${login}:${viewerId}`;
+}
+
+async function withDeduplication(key, handler) {
+  // Check if this exact request is already processing
+  if (activeRequests.has(key)) {
+    const startTime = activeRequests.get(key);
+    const waitTime = Date.now() - startTime;
+    console.log(`🔒 [DEDUPE] Blocked duplicate request: ${key} (gap: ${waitTime}ms)`);
+    
+    throw new Error("DUPLICATE_REQUEST");
+  }
+
+  // Mark request as active
+  activeRequests.set(key, Date.now());
+  console.log(`✅ [DEDUPE] Processing: ${key}`);
+
+  try {
+    return await handler();
+  } finally {
+    // Always cleanup after 3 seconds (even on error)
+    setTimeout(() => {
+      activeRequests.delete(key);
+      console.log(`🧹 [DEDUPE] Cleaned up: ${key}`);
+    }, 3000);
+  }
+}
+
 /**
  * POST /api/discounts/:login
  * Viewer personal discount (kind: "viewer")
  * Body: { viewerId, viewerLogin, viewerDisplayName }
  */
 router.post("/:login", async (req, res) => {
+  const routeId = Math.random().toString(36).slice(2, 9);
+  const timestamp = new Date().toISOString();
+  
+  console.log(`🌐 [ROUTE-${routeId}] ${timestamp} POST /api/discounts/${req.params.login}`);
+  console.log(`🌐 [ROUTE-${routeId}] Body:`, JSON.stringify(req.body));
+  
   const login = (req.params.login || "").toLowerCase();
   const { viewerId, viewerLogin, viewerDisplayName } = req.body || {};
 
   if (!login) {
+    console.log(`🌐 [ROUTE-${routeId}] ERROR: login missing`);
     return res.status(400).json({ ok: false, error: "login is required" });
   }
   if (!viewerId || !viewerLogin) {
+    console.log(`🌐 [ROUTE-${routeId}] ERROR: viewerId or viewerLogin missing`);
     return res.status(400).json({
       ok: false,
       error: "viewerId and viewerLogin are required",
     });
   }
 
-  let streamer;
-  let slot;
+  // 🔒 DEDUPE: Prevent duplicate requests for same viewer
+  const requestKey = createRequestKey(login, viewerId);
 
   try {
-    streamer = await Streamer.findOne({ twitchLogin: login });
-    if (!streamer) return res.status(404).json({ ok: false, reason: "not_found" });
+    return await withDeduplication(requestKey, async () => {
+      let streamer;
+      let slot;
 
-    const plan = getPlanForStreamer(streamer);
-    const limits = PLAN_LIMITS[plan] || PLAN_LIMITS.free;
+      try {
+        console.log(`🌐 [ROUTE-${routeId}] Finding streamer: ${login}`);
+        streamer = await Streamer.findOne({ twitchLogin: login });
+        
+        if (!streamer) {
+          console.log(`🌐 [ROUTE-${routeId}] ERROR: Streamer not found`);
+          return res.status(404).json({ ok: false, reason: "not_found" });
+        }
 
-    // ✅ server-side viewer cooldown (per viewerId)
-    const last = await Drop.findOne({
-      streamerId: streamer._id,
-      kind: "viewer",
-      viewerId: String(viewerId),
-    }).sort({ createdAt: -1 }).lean();
+        console.log(`🌐 [ROUTE-${routeId}] Streamer found: ${streamer._id}`);
 
-    const viewerCd = limits.viewerCooldownSeconds ?? 0;
-    if (last && viewerCd > 0) {
-      const since = secondsSince(last.createdAt);
-      if (since < viewerCd) {
-        const remaining = viewerCd - since;
-        return res.status(429).json({
-          ok: false,
-          reason: "cooldown",
-          retryAfterSeconds: remaining,
-          message: `Please wait ${remaining}s before requesting another discount.`,
+        const plan = getPlanForStreamer(streamer);
+        const limits = PLAN_LIMITS[plan] || PLAN_LIMITS.free;
+
+        // ✅ server-side viewer cooldown (per viewerId)
+        console.log(`🌐 [ROUTE-${routeId}] Checking cooldown...`);
+        const last = await Drop.findOne({
+          streamerId: streamer._id,
+          kind: "viewer",
+          viewerId: String(viewerId),
+        }).sort({ createdAt: -1 }).lean();
+
+        const viewerCd = limits.viewerCooldownSeconds ?? 0;
+        if (last && viewerCd > 0) {
+          const since = secondsSince(last.createdAt);
+          if (since < viewerCd) {
+            const remaining = viewerCd - since;
+            console.log(`🌐 [ROUTE-${routeId}] COOLDOWN: ${remaining}s remaining`);
+            return res.status(429).json({
+              ok: false,
+              reason: "cooldown",
+              retryAfterSeconds: remaining,
+              message: `Please wait ${remaining}s before requesting another discount.`,
+            });
+          }
+        }
+
+        console.log(`🌐 [ROUTE-${routeId}] Cooldown check passed`);
+
+        // ✅ reserve slot BEFORE doing any expensive work (atomic)
+        console.log(`🌐 [ROUTE-${routeId}] Calling reserveMonthlyDrop...`);
+        slot = await reserveMonthlyDrop({ streamer, kind: "viewer" });
+        console.log(`🌐 [ROUTE-${routeId}] reserveMonthlyDrop result:`, { ok: slot.ok, used: slot.used, limit: slot.limit });
+        
+        if (!slot.ok) {
+          console.log(`🌐 [ROUTE-${routeId}] Plan limit reached`);
+          return res.status(429).json({
+            ok: false,
+            reason: "plan_limit",
+            message: slot.message,
+            plan: slot.plan,
+            limit: slot.limit,
+            used: slot.used,
+          });
+        }
+
+        // create discount (this will create Drop row)
+        console.log(`🌐 [ROUTE-${routeId}] Calling createViewerDiscount...`);
+        const result = await createViewerDiscount(login, {
+          viewerId: String(viewerId),
+          viewerLogin: String(viewerLogin).toLowerCase(),
+          viewerDisplayName: viewerDisplayName || viewerLogin,
         });
+        console.log(`🌐 [ROUTE-${routeId}] createViewerDiscount result:`, { ok: result?.ok });
+
+        // If service fails, release reserved slot
+        if (!result?.ok) {
+          console.log(`🌐 [ROUTE-${routeId}] createViewerDiscount failed, releasing slot`);
+          await releaseMonthlyDrop({ streamer, kind: "viewer" });
+          return res.status(200).json(result);
+        }
+
+        console.log(`🌐 [ROUTE-${routeId}] SUCCESS - Discount created`);
+
+        // success: attach usage + warning (non-breaking for your bot/dashboard)
+        return res.status(200).json({
+          ...result,
+          usage: { kind: "viewer", used: slot.used, limit: slot.limit },
+          warning: slot.warning || null,
+        });
+      } catch (err) {
+        console.error(`❌ [ROUTE-${routeId}] Error in POST /api/discounts/:login`, err);
+
+        // release if we reserved a slot
+        if (streamer && slot?.ok) {
+          try {
+            console.log(`🌐 [ROUTE-${routeId}] Exception caught, releasing slot`);
+            await releaseMonthlyDrop({ streamer, kind: "viewer" });
+          } catch (_) {}
+        }
+
+        return res.status(500).json({ ok: false, error: "Internal server error" });
       }
-    }
-
-    // ✅ reserve slot BEFORE doing any expensive work (atomic)
-    slot = await reserveMonthlyDrop({ streamer, kind: "viewer" });
-    if (!slot.ok) {
-      return res.status(429).json({
-        ok: false,
-        reason: "plan_limit",
-        message: slot.message,
-        plan: slot.plan,
-        limit: slot.limit,
-        used: slot.used,
-      });
-    }
-
-    // create discount (this will create Drop row)
-    const result = await createViewerDiscount(login, {
-      viewerId: String(viewerId),
-      viewerLogin: String(viewerLogin).toLowerCase(),
-      viewerDisplayName: viewerDisplayName || viewerLogin,
-    });
-
-    // If service fails, release reserved slot (using correct periodKey)
-    if (!result?.ok) {
-      await releaseMonthlyDrop({ streamer, kind: "viewer", periodKey: slot.periodKey });
-      return res.status(200).json(result);
-    }
-
-    // success: attach usage + warning (non-breaking for your bot/dashboard)
-    return res.status(200).json({
-      ...result,
-      usage: { kind: "viewer", used: slot.used, limit: slot.limit },
-      warning: slot.warning || null,
     });
   } catch (err) {
-    console.error("❌ Error in POST /api/discounts/:login", err);
-
-    // release if we reserved a slot
-    if (streamer && slot?.ok) {
-      try {
-        await releaseMonthlyDrop({ streamer, kind: "viewer", periodKey: slot.periodKey });
-      } catch (_) {}
+    if (err.message === "DUPLICATE_REQUEST") {
+      console.log(`⚠️ [ROUTE-${routeId}] Duplicate request blocked for ${requestKey}`);
+      return res.status(429).json({
+        ok: false,
+        reason: "duplicate",
+        message: "Request already processing, please wait"
+      });
     }
-
-    return res.status(500).json({ ok: false, error: "Internal server error" });
+    throw err;
   }
 });
 
@@ -185,7 +265,7 @@ router.post("/:login/global", async (req, res) => {
     const drop = await createGlobalDrop(streamer, percent);
 
     if (!drop) {
-      await releaseMonthlyDrop({ streamer, kind: "global", periodKey: slot.periodKey });
+      await releaseMonthlyDrop({ streamer, kind: "global" });
       return res.status(500).json({ ok: false, error: "Failed to create global drop" });
     }
 
@@ -200,7 +280,7 @@ router.post("/:login/global", async (req, res) => {
 
     if (streamer && slot?.ok) {
       try {
-        await releaseMonthlyDrop({ streamer, kind: "global", periodKey: slot.periodKey });
+        await releaseMonthlyDrop({ streamer, kind: "global" });
       } catch (_) {}
     }
 
