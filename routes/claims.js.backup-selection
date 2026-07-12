@@ -2,7 +2,6 @@
 require("dotenv").config();
 
 const express = require("express");
-const mongoose = require("mongoose");
 
 const DiscountClaim = require("../models/DiscountClaim");
 const Streamer = require("../models/Streamer");
@@ -75,6 +74,12 @@ async function markClaimFailed(
   );
 }
 
+/**
+ * GET /api/claims/pending
+ *
+ * Checks whether the authenticated Twitch
+ * viewer has an active pending claim.
+ */
 /**
  * GET /api/claims/pending
  *
@@ -192,14 +197,14 @@ router.get(
         ok: true,
 
         /*
-         * Temporary support for the existing
-         * page when there is one claim.
+         * Keep the old field temporarily so
+         * the current claim page still works.
          */
         claim: claims[0],
 
         /*
-         * Complete list used by the improved
-         * multiple-claim page.
+         * The improved claim page will use
+         * this complete list.
          */
         claims,
       });
@@ -233,15 +238,9 @@ router.post(
         .toString(36)
         .slice(2, 9);
 
-    const requestedClaimId =
-      req.body?.claimId
-        ? String(req.body.claimId)
-        : null;
-
     let claim = null;
     let streamer = null;
     let reservedSlot = null;
-    let selectedClaimId = null;
 
     console.log(
       `[CLAIM-REDEEM-${requestId}] Viewer: ${req.viewer.login} (${req.viewer.twitchId})`
@@ -249,89 +248,14 @@ router.post(
 
     try {
       /*
-       * Use the exact claim selected by
-       * the viewer on the claim page.
+       * Atomically change pending → processing.
        *
-       * For compatibility with the current
-       * page, no claimId is required when
-       * there is exactly one active claim.
-       */
-      if (requestedClaimId) {
-        if (
-          !mongoose.Types.ObjectId.isValid(
-            requestedClaimId
-          )
-        ) {
-          return res.status(400).json({
-            ok: false,
-            reason: "invalid_claim_id",
-            message:
-              "The selected discount claim is invalid.",
-          });
-        }
-
-        selectedClaimId =
-          requestedClaimId;
-      } else {
-        const activeClaims =
-          await DiscountClaim.find({
-            viewerTwitchId:
-              req.viewer.twitchId,
-
-            status: {
-              $in: [
-                "pending",
-                "processing",
-              ],
-            },
-
-            expiresAt: {
-              $gt: new Date(),
-            },
-          })
-            .sort({
-              createdAt: -1,
-            })
-            .select("_id")
-            .limit(2)
-            .lean();
-
-        if (!activeClaims.length) {
-          return res.status(404).json({
-            ok: false,
-            reason:
-              "no_pending_claim",
-            message:
-              "No active discount claim was found for this Twitch account.",
-          });
-        }
-
-        if (activeClaims.length > 1) {
-          return res.status(409).json({
-            ok: false,
-            reason:
-              "claim_selection_required",
-            message:
-              "You have multiple pending discounts. Please select which streamer you want to claim from.",
-          });
-        }
-
-        selectedClaimId =
-          String(activeClaims[0]._id);
-      }
-
-      /*
-       * Atomically lock the exact claim.
-       *
-       * Both the claim ID and signed-in
-       * Twitch ID must match. A viewer cannot
-       * redeem another viewer's claim.
+       * Only one request can successfully
+       * lock this claim.
        */
       claim =
         await DiscountClaim.findOneAndUpdate(
           {
-            _id: selectedClaimId,
-
             viewerTwitchId:
               req.viewer.twitchId,
 
@@ -349,14 +273,16 @@ router.post(
           },
           {
             new: true,
+
+            sort: {
+              createdAt: -1,
+            },
           }
         );
 
       if (!claim) {
         const processingClaim =
           await DiscountClaim.findOne({
-            _id: selectedClaimId,
-
             viewerTwitchId:
               req.viewer.twitchId,
 
@@ -373,24 +299,19 @@ router.post(
             reason:
               "already_processing",
             message:
-              "This discount is already being prepared.",
+              "Your discount is already being prepared.",
           });
         }
 
         return res.status(404).json({
           ok: false,
           reason:
-            "claim_not_available",
+            "no_pending_claim",
           message:
-            "This discount claim does not exist, has expired, or belongs to another Twitch account.",
+            "No active discount claim was found for this Twitch account.",
         });
       }
 
-      /*
-       * The streamer is loaded directly from
-       * the selected claim. This guarantees the
-       * correct streamer's Shopify account is used.
-       */
       streamer =
         await Streamer.findById(
           claim.streamerId
@@ -443,8 +364,8 @@ router.post(
       }
 
       /*
-       * Check viewer cooldown before using
-       * monthly plan capacity.
+       * Check the viewer cooldown before
+       * reserving monthly plan usage.
        */
       const plan =
         getPlanForStreamer(streamer);
@@ -507,7 +428,7 @@ router.post(
 
       /*
        * Reserve monthly plan usage before
-       * creating anything in Shopify.
+       * generating the Shopify discount.
        */
       reservedSlot =
         await reserveMonthlyDrop({
@@ -537,7 +458,8 @@ router.post(
       }
 
       /*
-       * Shopify discount generation.
+       * This is the only point where the
+       * Shopify discount is generated.
        */
       const result =
         await createViewerDiscount(
@@ -599,7 +521,8 @@ router.post(
         );
 
       /*
-       * Save the generated Drop on the claim.
+       * Save the generated Drop reference
+       * on the claim.
        */
       try {
         await DiscountClaim.updateOne(
@@ -625,9 +548,8 @@ router.post(
         );
       } catch (claimUpdateError) {
         /*
-         * Shopify already created the discount,
-         * so return it even if this secondary
-         * database update fails.
+         * The discount already exists, so we
+         * still return it to the viewer.
          */
         console.error(
           `[CLAIM-REDEEM-${requestId}] Discount created but claim update failed:`,
