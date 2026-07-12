@@ -6,11 +6,14 @@ const rateLimit = require("express-rate-limit");
 const express = require("express");
 const cors = require("cors");
 const mongoose = require("mongoose");
+const cookieParser = require("cookie-parser");
 
 // Routes
 const authRoutes = require("./routes/auth");
+const viewerAuthRoutes = require("./routes/viewerAuth");
 const streamerRoutes = require("./routes/streamers");
 const discountRoutes = require("./routes/discounts");
+const claimRoutes = require("./routes/claims");
 const shopifyRoutes = require("./routes/shopify");
 const webhookRoutes = require("./routes/webhooks");
 const redemptionsRouter = require("./routes/redemptions");
@@ -41,6 +44,11 @@ app.use(
     credentials: true,
   })
 );
+
+/* =======================
+   COOKIES
+   ======================= */
+app.use(cookieParser());
 
 /* =======================
    BODY PARSER (CRITICAL)
@@ -76,8 +84,10 @@ app.use("/api/", apiLimiter);
    ROUTES
    ======================= */
 app.use("/api/auth", authRoutes);
+app.use("/api/auth/viewer", viewerAuthRoutes);
 app.use("/api/streamers", streamerRoutes);
 app.use("/api/discounts", discountRoutes);
+app.use("/api/claims", claimRoutes);
 app.use("/api/shopify", shopifyRoutes);
 app.use("/webhooks", webhookRoutes);
 app.use("/api/redemptions", redemptionsRouter);
